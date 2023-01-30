@@ -36,6 +36,10 @@ def pulldata(storinator, study, output_path, modality, sequence=-1):
     for idx in tqdm(range(len(desired_path))):
         os.chdir(f'{desired_path[idx]}')
         file = desired_path[idx].split('/')[-1]
+        try:
+            os.mkdir(f'{output_path}')
+        except:
+            pass
         os.system(f'rsync -a {desired_path[idx]} {output_path}/{modality}')
         os.chdir(f'{output_path}/{modality}/{file}')
         os.system(f'dcm2niix -z y -f %i_%t -o {output_path}/{modality} * ')
