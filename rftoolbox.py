@@ -188,23 +188,8 @@ def apply_nyul(img, npy, out):
 
     return norm_img.get_fdata()
 
-# def apply_fcm(img, m, t, out):
-#     pdb.set_trace()
-#     fcm_norm = FCMNormalize(tissue_type=TissueType.t)
-#     normalized = fcm_norm(img.to_nibabel().get_fdata(), modality=Modality.m)
-#     normalized = nib.Nifti1Image(normalized, img.to_nibabel().affine)
-#     nib.save(normalized, out)
-
-#     return normalized.get_fdata()
     
-
 def ratioCalc(T1, T2, mask, quantile):
-    
-    # T2_mask = np.zeros_like(T2)
-    # T2_template_ind = np.argwhere(T2 >= 0.001)
-    # for idx in range(len(T2_template_ind)):
-    #     x,y,z = T2_template_ind[idx]
-    #     T2_mask[x,y,z] = 1
     
     ratio = T1/(T2)
     ratio[np.isnan(ratio)] = 0
