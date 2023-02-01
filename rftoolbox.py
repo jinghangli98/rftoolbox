@@ -7,6 +7,12 @@ from tqdm import tqdm
 import torch
 import pydicom
 import nibabel as nib
+import ants
+import torchio as tio
+from intensity_normalization.normalize.nyul import NyulNormalize
+from intensity_normalization.typing import Modality, TissueType
+from intensity_normalization.normalize.fcm import FCMNormalize
+import psutil
 
 def pulldata(storinator, study, output_path, modality, sequence=-1):
     
@@ -125,21 +131,167 @@ def quality_rating(storinator, study, output='.', inpath=None, mode='dcm'):
             print(f'File: {file_name} | Rating: {rating}')
             f.write(f'File: {file_name} | Rating: {rating}\n')
 
-def icv(inpath, voxel_size, core=6):
-    os.system(f'gunzip {inpath}/*')
+def icv(inpath, voxel_size=None, core=6):
+    os.system(f'gunzip {inpath}')
     skull_strip = 'mri_synthstrip -i {} -o {.}_skullstripped.nii.gz -m {.}_icv_mask.nii.gz'
-    os.system(f'ls {inpath}/* | parallel --jobs {core} {skull_strip}')
+    os.system(f'ls {inpath} | parallel --jobs {core} {skull_strip}')
 
-    icv_files = glob.glob(f'{inpath}/*mask.nii.gz')
-    icv_files = natsorted(icv_files)
+    if voxel_size is not None:
+        icv_files = glob.glob(f'{inpath}/*mask.nii.gz')
+        icv_files = natsorted(icv_files)
 
-    icv_nii = [nib.load(p).get_fdata() for p in icv_files]
-    icv_count = [np.sum(nii) for nii in icv_nii]
-    voxel_size = voxel_size[0] * voxel_size[1] * voxel_size[2]
-    icv = [icv * voxel_size for icv in icv_count]
+        icv_nii = [nib.load(p).get_fdata() for p in icv_files]
+        icv_count = [np.sum(nii) for nii in icv_nii]
+        voxel_size = voxel_size[0] * voxel_size[1] * voxel_size[2]
+        icv = [icv * voxel_size for icv in icv_count]
+        
+        return icv, icv_count, [file.split('/')[-1] for file in icv_files]
+    else:
+        icv_files = glob.glob(f'{inpath}/*mask.nii.gz')
+        icv_files = natsorted(icv_files)
+        icv_nii = [nib.load(p).get_fdata() for p in icv_files]
+        
+        return icv_nii
+
+def n4_writepath(path):
+
+    filename = path.split('/')[-1]
+    path = path.split('/')[1:-1]
+    path.insert(0,'/')
+    prefix_path = os.path.join(*path)
+    path.append(f'n4_{filename}')
+    path = os.path.join(*path)
+
+    return path, prefix_path
+
+def train_nyul(img_paths, standard_histogram_out):
+    nyul_normalizer = NyulNormalize()
+    images = []
+
+    for i in tqdm(range(len(img_paths))):
+        
+        images.append(nib.load(img_paths[i]).get_fdata())
+        # if i % 10 == 0:
+        #     print(f'RAM memory % used: {psutil.virtual_memory()[2]}')
+            
+        if psutil.virtual_memory()[2] > 90:
+            break
+    nyul_normalizer.fit(images)
+    nyul_normalizer.save_standard_histogram(f"{standard_histogram_out}")
+
+def apply_nyul(img, npy, out):
+    nyul_normalizer = NyulNormalize()
+    nyul_normalizer.load_standard_histogram(npy)
+    norm_img = nyul_normalizer(img.to_nibabel().get_fdata())
+    norm_img = nib.Nifti1Image(norm_img, img.to_nibabel().affine)
+    nib.save(norm_img, out)
+
+    return norm_img.get_fdata()
+
+# def apply_fcm(img, m, t, out):
+#     pdb.set_trace()
+#     fcm_norm = FCMNormalize(tissue_type=TissueType.t)
+#     normalized = fcm_norm(img.to_nibabel().get_fdata(), modality=Modality.m)
+#     normalized = nib.Nifti1Image(normalized, img.to_nibabel().affine)
+#     nib.save(normalized, out)
+
+#     return normalized.get_fdata()
     
-    return icv, icv_count, [file.split('/')[-1] for file in icv_files]
+
+def ratioCalc(T1, T2, mask, quantile):
+    
+    # T2_mask = np.zeros_like(T2)
+    # T2_template_ind = np.argwhere(T2 >= 0.001)
+    # for idx in range(len(T2_template_ind)):
+    #     x,y,z = T2_template_ind[idx]
+    #     T2_mask[x,y,z] = 1
+    
+    ratio = T1/(T2)
+    ratio[np.isnan(ratio)] = 0
+
+    upper_lim = np.quantile(ratio.flatten(), quantile)
+    ratio[ratio >= upper_lim] = 0
+
+    return ratio * mask
+
+def myelinmap(T1_path, T2_path, T1_npy=None, T2_npy=None, ratio_map_output=None):
+    print('Calculating T1-T2 Ratio Map.......')
+
+    #bias correction
+    T1_N4 = ants.n4_bias_field_correction(ants.image_read(T1_path))
+    T2_N4 = ants.n4_bias_field_correction(ants.image_read(T2_path))
+    print('(1) Bias correction done!')
+    
+    T1_path, prefix_T1 = n4_writepath(T1_path)
+    T2_path, prefix_T2 = n4_writepath(T2_path)
+
+    ants.image_write(T1_N4, f'{T1_path}')
+    ants.image_write(T2_N4, f'{T2_path}')
+    
+    #skull stripping
+    icv(T1_path, core=6)
+    icv(T2_path, core=6)
+    
+    T1_skull_stripped = glob.glob(T1_path.split('.nii')[0] + '_skullstripped.nii.gz')[0]
+    T1_brain_mask = glob.glob(T1_path.split('.nii')[0] + '_icv_mask.nii.gz')[0]
+    T2_skull_stripped = glob.glob(T2_path.split('.nii')[0] + '_skullstripped.nii.gz')[0]
+    T2_brain_mask = glob.glob(T2_path.split('.nii')[0] + '_icv_mask.nii.gz')[0]
+    print('(2) Skull stripping done!')
+
+    T1_spacing = np.round(T1_N4.spacing, 2)
+    T2_spacing = np.round(T2_N4.spacing, 2)
+    
+    #reslicing to the lowest resolution
+    resample_spacing = (np.max((T1_spacing[0], T2_spacing[0])),
+    np.max((T1_spacing[1], T2_spacing[1])),
+    np.max((T1_spacing[2], T2_spacing[2])))
+    transform = tio.Resample(resample_spacing)
+    rT1 = transform(nib.load(T1_skull_stripped))
+    rT2 = transform(nib.load(T2_skull_stripped))
+    rmask = transform(nib.load(T1_brain_mask))
+    print('(3) Reslicing done!')
+
+    #Registration
+    T1 = ants.from_nibabel(rT1)
+    T2 = ants.from_nibabel(rT2)
+    registered_T2 = ants.registration(fixed=T1 , moving=T2, type_of_transform='Rigid')['warpedmovout']
+    print('(4) Registration done!')
+
+    # nyul_T1 = apply_nyul(T1, T1_npy, f'{prefix_T1}/nyul_T1.nii.gz')
+    # nyul_T2 = apply_nyul(T2, T2_npy, f'{prefix_T2}/nyul_T2.nii.gz')
+    if T1_npy is None and T1_npy is None:
+        print('Applying FCM normalization')
+        fcm_norm = FCMNormalize(tissue_type=TissueType.WM)
+        T1_normalized = fcm_norm(T1.to_nibabel().get_fdata(), modality=Modality.T1)
+        T2_normalized = fcm_norm(registered_T2.to_nibabel().get_fdata(), modality=Modality.T2)
+        T1_normalized = nib.Nifti1Image(T1_normalized, T1.to_nibabel().affine)
+        T2_normalized = nib.Nifti1Image(T2_normalized, registered_T2.to_nibabel().affine)
+
+        nib.save(T1_normalized, f'{prefix_T1}/fcm_T1.nii.gz')
+        nib.save(T2_normalized, f'{prefix_T2}/fcm_T2.nii.gz')
+        T1_normalized = T1_normalized.get_fdata()
+        T2_normalized = T2_normalized.get_fdata()
+        print('(5) Normalization done!')
+    else: 
+        print('Applying Nyul normalization')
+        T1_normalized = apply_nyul(T1, T1_npy, f'{prefix_T1}/nyul_T1.nii.gz')
+        T2_normalized = apply_nyul(registered_T2, T2_npy, f'{prefix_T2}/nyul_T2.nii.gz')
+        print('(5) Normalization done!')
+
+    
+    if ratio_map_output is None:
+        ratio_map_output = prefix_T2
+        if T1_npy is None and T1_npy is None: 
+            ratio_map_output += '/fcm_ratio_map.nii.gz'
+        else:
+            ratio_map_output += '/nyul_ratio_map.nii.gz'
+    
+    
+    ratio_map = ratioCalc(T1_normalized, T2_normalized, rmask.get_fdata(), 0.995)
+    ratio_map = nib.Nifti1Image(ratio_map, affine=registered_T2.to_nibabel().affine)
+    nib.save(ratio_map, ratio_map_output)
+    print(f'Ratio map saved to {ratio_map_output}')
+    
 
 
-            
-            
+
