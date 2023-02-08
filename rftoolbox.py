@@ -7,12 +7,12 @@ from tqdm import tqdm
 import torch
 import pydicom
 import nibabel as nib
-import ants
-import torchio as tio
-from intensity_normalization.normalize.nyul import NyulNormalize
-from intensity_normalization.typing import Modality, TissueType
-from intensity_normalization.normalize.fcm import FCMNormalize
-import psutil
+# import ants
+# import torchio as tio
+# from intensity_normalization.normalize.nyul import NyulNormalize
+# from intensity_normalization.typing import Modality, TissueType
+# from intensity_normalization.normalize.fcm import FCMNormalize
+# import psutil
 
 def pulldata(storinator, study, output_path, modality, sequence=-1):
     
@@ -35,7 +35,12 @@ def pulldata(storinator, study, output_path, modality, sequence=-1):
         modality_files = glob.glob(f'{storinator}/scans/{study}/{date}/*/*{modality}*')
         subIndx = np.int16([p.split('.')[-1] for p in modality_files])
         subIndx = natsorted(subIndx)
-        desired_path.append(glob.glob(f'{storinator}/scans/{study}/{date}/*/*{modality}*.{subIndx[sequence]}')[0])
+        if sequence is None:
+            for ind in subIndx:
+                desired_path.append(glob.glob(f'{storinator}/scans/{study}/{date}/*/*{modality}*.{ind}')[0])
+        else:
+            desired_path.append(glob.glob(f'{storinator}/scans/{study}/{date}/*/*{modality}*.{subIndx[sequence]}')[0])
+            
 
     if desired_path is not None:
         print('Pulling storinator data now.......')
@@ -52,7 +57,36 @@ def pulldata(storinator, study, output_path, modality, sequence=-1):
         os.chdir('..')
         os.system(f'rm -r {file}')
         os.system(f'rm *json*')
-
+        
+def pulldata_globus(storinator, study, output_path, scanID='*'):
+    try:
+        os.mkdir(f'{output_path}')
+    except:
+        pass
+    os.chdir(f'{storinator}/scans')
+    files = glob.glob(f'{study}/*/{scanID}/*')
+    scanID = [p.split('/')[2] for p in files]
+    scanID = np.unique(scanID)
+    dates = [p.split('/')[1] for p in files]
+    dates = np.unique(dates)
+    
+    
+    for idx in tqdm(range(len(files))):
+        file = files[idx].split('/')[-1]
+        try:
+            os.mkdir(f'{output_path}')
+        except:
+            pass
+        
+        os.chdir(f'{storinator}/scans')
+        os.system(f'rsync -a -R {files[idx]} {output_path}')
+        os.chdir(f'{output_path}/{files[idx]}')
+        os.system(f'dcm2niix -z y * ')
+        os.system(f'cp *.nii.gz ..')
+        
+        os.chdir('..')
+        os.system(f'rm -r {file}')
+        
 def crop(image, size):
     new_h, new_w = size
     h, w = image.shape
