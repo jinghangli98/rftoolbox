@@ -7,12 +7,13 @@ from tqdm import tqdm
 import torch
 import pydicom
 import nibabel as nib
-# import ants
-# import torchio as tio
-# from intensity_normalization.normalize.nyul import NyulNormalize
-# from intensity_normalization.typing import Modality, TissueType
-# from intensity_normalization.normalize.fcm import FCMNormalize
-# import psutil
+import ants
+import torchio as tio
+from intensity_normalization.normalize.nyul import NyulNormalize
+from intensity_normalization.typing import Modality, TissueType
+from intensity_normalization.normalize.fcm import FCMNormalize
+import psutil
+import cv2 as cv
 
 def pulldata(storinator, study, output_path, modality, sequence=-1):
     
@@ -166,7 +167,7 @@ def quality_rating(storinator, study, output='.', inpath=None, mode='dcm'):
             f.write(f'File: {file_name} | Rating: {rating}\n')
 
 def icv(inpath, voxel_size=None, core=6):
-    os.system(f'gunzip {inpath}')
+    # os.system(f'gunzip {inpath}')
     skull_strip = 'mri_synthstrip -i {} -o {.}_skullstripped.nii.gz -m {.}_icv_mask.nii.gz'
     os.system(f'ls {inpath} | parallel --jobs {core} {skull_strip}')
 
@@ -193,7 +194,7 @@ def n4_writepath(path):
     path = path.split('/')[1:-1]
     path.insert(0,'/')
     prefix_path = os.path.join(*path)
-    path.append(f'n4_{filename}')
+    path.append(f'{filename}')
     path = os.path.join(*path)
 
     return path, prefix_path
@@ -240,27 +241,38 @@ def ratioCalc(T1, T2, mask, quantile):
     #     x,y,z = T2_template_ind[idx]
     #     T2_mask[x,y,z] = 1
     
-    ratio = T1/(T2)
+    ratio = T1/T2
     ratio[np.isnan(ratio)] = 0
 
     upper_lim = np.quantile(ratio.flatten(), quantile)
     ratio[ratio >= upper_lim] = 0
+    ratio_img = ratio * mask * 100
+    hole_mask = mask * np.array(ratio == 0).astype(int)
+    filledimg = cvInpaint(ratio_img, hole_mask)
+    return filledimg/100
 
-    return ratio * mask
+def cvInpaint(img, mask):
+    filled_img = np.zeros_like(img)
+    for idx in range(img.shape[-1]):
+        im = img[:,:,idx]
+        ma = mask[:,:,idx]
+        filled_img[:,:,idx] = cv.inpaint(im.astype(np.float32), ma.astype(np.uint8), 3, cv.INPAINT_TELEA)
+    return filled_img
 
 def myelinmap(T1_path, T2_path, T1_npy=None, T2_npy=None, ratio_map_output=None):
     print('Calculating T1-T2 Ratio Map.......')
 
     #bias correction
-    T1_N4 = ants.n4_bias_field_correction(ants.image_read(T1_path))
-    T2_N4 = ants.n4_bias_field_correction(ants.image_read(T2_path))
-    print('(1) Bias correction done!')
+    T1_N4 = ants.image_read(T1_path)
+    T2_N4 = ants.image_read(T2_path)
+    
+    # print('(1) Bias correction done!')
     
     T1_path, prefix_T1 = n4_writepath(T1_path)
     T2_path, prefix_T2 = n4_writepath(T2_path)
 
-    ants.image_write(T1_N4, f'{T1_path}')
-    ants.image_write(T2_N4, f'{T2_path}')
+    # ants.image_write(T1_N4, f'{T1_path}')
+    # ants.image_write(T2_N4, f'{T2_path}')
     
     #skull stripping
     icv(T1_path, core=6)
@@ -321,7 +333,7 @@ def myelinmap(T1_path, T2_path, T1_npy=None, T2_npy=None, ratio_map_output=None)
             ratio_map_output += '/nyul_ratio_map.nii.gz'
     
     
-    ratio_map = ratioCalc(T1_normalized, T2_normalized, rmask.get_fdata(), 0.995)
+    ratio_map = ratioCalc(T1_normalized, T2_normalized, rmask.get_fdata(), 0.99)
     ratio_map = nib.Nifti1Image(ratio_map, affine=registered_T2.to_nibabel().affine)
     nib.save(ratio_map, ratio_map_output)
     print(f'Ratio map saved to {ratio_map_output}')
